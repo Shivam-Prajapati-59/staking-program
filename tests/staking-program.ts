@@ -57,6 +57,42 @@ describe("staking-program", () => {
       } as any)
       .rpc();
     console.log("Your transaction signature", tx);
+
+    // Fund the vault with tokens for rewards
+    let [vaultPDA] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault")],
+      program.programId
+    );
+
+    let userTokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      payer.payer,
+      mintKeypair.publicKey,
+      payer.publicKey
+    );
+
+    // Mint tokens to user first
+    await mintTo(
+      connection,
+      payer.payer,
+      mintKeypair.publicKey,
+      userTokenAccount.address,
+      payer.payer,
+      1e15 // Large amount for testing
+    );
+
+    // Transfer tokens to vault for rewards
+    const { transfer } = await import("@solana/spl-token");
+    await transfer(
+      connection,
+      payer.payer,
+      userTokenAccount.address,
+      vaultPDA,
+      payer.payer,
+      1e14 // Fund vault with rewards
+    );
+
+    console.log("Vault funded with rewards");
   });
 
   it("stake", async () => {
@@ -65,15 +101,6 @@ describe("staking-program", () => {
       payer.payer,
       mintKeypair.publicKey,
       payer.publicKey
-    );
-
-    await mintTo(
-      connection,
-      payer.payer,
-      mintKeypair.publicKey,
-      userTokenAccount.address,
-      payer.payer,
-      1e11
     );
 
     let [stakeInfo] = PublicKey.findProgramAddressSync(
@@ -86,25 +113,99 @@ describe("staking-program", () => {
       program.programId
     );
 
-    await getOrCreateAssociatedTokenAccount(
+    try {
+      const tx = await program.methods
+        .stake(new anchor.BN(1))
+        .accounts({
+          stakeInfoAccount: stakeInfo,
+          stakeAccount: stakeAccount,
+          userTokenAccount: userTokenAccount.address,
+          mint: mintKeypair.publicKey,
+          signer: payer.publicKey,
+        } as any)
+        .rpc();
+
+      console.log("Stake transaction signature", tx);
+    } catch (error) {
+      // If already staked, destake first then stake again
+      if (error.toString().includes("IsStaked")) {
+        console.log("Already staked, destaking first...");
+
+        let [vaultAccount] = PublicKey.findProgramAddressSync(
+          [Buffer.from("vault")],
+          program.programId
+        );
+
+        await program.methods
+          .destake()
+          .accounts({
+            stakeAccount: stakeAccount,
+            stakeInfoAccount: stakeInfo,
+            userTokenAccount: userTokenAccount.address,
+            tokenVault: vaultAccount,
+            signer: payer.publicKey,
+            mint: mintKeypair.publicKey,
+          } as any)
+          .rpc();
+
+        console.log("Destaked successfully, now staking again...");
+
+        const tx = await program.methods
+          .stake(new anchor.BN(1))
+          .accounts({
+            stakeInfoAccount: stakeInfo,
+            stakeAccount: stakeAccount,
+            userTokenAccount: userTokenAccount.address,
+            mint: mintKeypair.publicKey,
+            signer: payer.publicKey,
+          } as any)
+          .rpc();
+
+        console.log("Stake transaction signature", tx);
+      } else {
+        throw error;
+      }
+    }
+  });
+
+  it("destake", async () => {
+    // Wait a bit to accumulate some slots for rewards
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    let userTokenAccount = await getOrCreateAssociatedTokenAccount(
       connection,
       payer.payer,
       mintKeypair.publicKey,
       payer.publicKey
     );
 
+    let [stakeInfo] = PublicKey.findProgramAddressSync(
+      [Buffer.from("stake"), payer.publicKey.toBuffer()],
+      program.programId
+    );
+
+    let [stakeAccount] = PublicKey.findProgramAddressSync(
+      [Buffer.from("token"), payer.publicKey.toBuffer()],
+      program.programId
+    );
+
+    let [vaultAccount] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault")],
+      program.programId
+    );
+
     const tx = await program.methods
-      .stake(new anchor.BN(1))
-      .signers([payer.payer])
+      .destake()
       .accounts({
-        stakeInfoAccount: stakeInfo,
         stakeAccount: stakeAccount,
+        stakeInfoAccount: stakeInfo,
         userTokenAccount: userTokenAccount.address,
-        mint: mintKeypair.publicKey,
+        tokenVault: vaultAccount,
         signer: payer.publicKey,
+        mint: mintKeypair.publicKey,
       } as any)
       .rpc();
 
-    console.log("Stake transaction signature", tx);
+    console.log("Destake transaction signature", tx);
   });
 });
